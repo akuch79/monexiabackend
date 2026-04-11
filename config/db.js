@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 
 let retries = 0;
 const MAX_RETRIES = 5;
-const RETRY_DELAY = 5000; // 5 seconds
+const RETRY_DELAY = 5004; // 5 seconds
 
 const connectDB = async () => {
   try {
