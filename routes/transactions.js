@@ -17,7 +17,7 @@ const protect = (req, res, next) => {
   }
 };
 
-// GET /api/transactions — get all for logged-in user
+// GET /api/transactions
 router.get("/", protect, async (req, res) => {
   try {
     const transactions = await Transaction.find({ user: req.userId }).sort({ createdAt: -1 });
@@ -27,21 +27,46 @@ router.get("/", protect, async (req, res) => {
   }
 });
 
-// POST /api/transactions — add new transaction
+// POST /api/transactions
 router.post("/", protect, async (req, res) => {
   try {
-    const { description, amount, type, date } = req.body;
+    const { description, amount, type, date, phone, category } = req.body; // ✅ destructure all
+
     if (!description || !amount || !type)
       return res.status(400).json({ message: "description, amount and type are required" });
 
     const transaction = await Transaction.create({
-      user: req.userId,
+      user:        req.userId,
       description,
-      amount,
+      amount:      Number(amount),                       // ✅ ensure number
       type,
-      date: date || Date.now(),
+      phone:       phone || "",                          // ✅ safe default
+      category:    category || "General",
+      date:        date || Date.now(),
     });
+
     res.status(201).json(transaction);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/transactions/:id — update
+router.put("/:id", protect, async (req, res) => {
+  try {
+    const transaction = await Transaction.findOne({ _id: req.params.id, user: req.userId });
+    if (!transaction) return res.status(404).json({ message: "Transaction not found" });
+
+    const { description, amount, type, category, phone, date } = req.body;
+    if (description) transaction.description = description;
+    if (amount)      transaction.amount      = Number(amount);
+    if (type)        transaction.type        = type;
+    if (category)    transaction.category    = category;
+    if (phone)       transaction.phone       = phone;
+    if (date)        transaction.date        = date;
+
+    await transaction.save();
+    res.json(transaction);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
