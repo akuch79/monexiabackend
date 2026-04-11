@@ -4,7 +4,9 @@ import bcrypt from 'bcryptjs';
 const UserSchema = new mongoose.Schema({
   name:     { type: String, required: true },
   email:    { type: String, required: true, unique: true, lowercase: true, trim: true }, // ✅ normalize
-  password: { type: String, required: true }
+  password: { type: String, required: true },
+  resetToken:        { type: String },        // ✅ add this
+  resetTokenExpiry:  { type: Date },   
 });
 
 // ✅ REMOVED pre('save') hash — auth.js already hashes before create()
