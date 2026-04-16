@@ -15,6 +15,15 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// ✅ Verify email connection on server startup
+transporter.verify((error, success) => {
+  if (error) {
+    console.error("❌ Email transporter error:", error.message);
+  } else {
+    console.log("✅ Email transporter ready — emails will send");
+  }
+});
+
 // ── Twilio client ────────────────────────────────────────────
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
@@ -85,41 +94,69 @@ export const forgotPassword = async (req, res) => {
     await user.save();
 
     const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    console.log("🔗 Reset link generated:", resetLink);
 
+    // ── Send EMAIL ───────────────────────────────────────────
     if (email) {
-      await transporter.sendMail({
-        from:    `"Monexia" <${process.env.EMAIL_USER}>`,
-        to:      user.email,
-        subject: "Reset Your Monexia Password",
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:2rem;
-                      background:#0a0f0d;color:#f8fafc;border-radius:16px;">
-            <h2 style="color:#10b981;">Reset Your Password</h2>
-            <p style="color:#94a3b8;">
-              Click below to reset your password. Expires in <strong style="color:#f8fafc;">1 hour</strong>.
-            </p>
-            <a href="${resetLink}"
-               style="display:inline-block;margin-top:1rem;background:#10b981;
-                      color:#064e3b;padding:14px 32px;border-radius:10px;
-                      text-decoration:none;font-weight:700;">
-              Reset Password
-            </a>
-            <p style="margin-top:2rem;color:#64748b;font-size:0.8rem;">
-              Didn't request this? Ignore this email safely.
-            </p>
-          </div>
-        `,
-      });
-      return res.json({ message: "Reset link sent to your email!" });
+      try {
+        await transporter.sendMail({
+          from:    `"Monexia" <${process.env.EMAIL_USER}>`,
+          to:      user.email,
+          subject: "Reset Your Monexia Password",
+          html: `
+            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:2rem;
+                        background:#0a0f0d;color:#f8fafc;border-radius:16px;">
+              <h2 style="color:#10b981;">Reset Your Password</h2>
+              <p style="color:#94a3b8;">
+                Click below to reset your password. Expires in <strong style="color:#f8fafc;">1 hour</strong>.
+              </p>
+              <a href="${resetLink}"
+                 style="display:inline-block;margin-top:1rem;background:#10b981;
+                        color:#064e3b;padding:14px 32px;border-radius:10px;
+                        text-decoration:none;font-weight:700;">
+                Reset Password
+              </a>
+              <p style="margin-top:2rem;color:#64748b;font-size:0.8rem;">
+                Didn't request this? Ignore this email safely.
+              </p>
+              <hr style="border-color:#1e293b;margin:1.5rem 0;">
+              <p style="color:#475569;font-size:0.75rem;">
+                Or copy this link into your browser:<br>
+                <span style="color:#10b981;">${resetLink}</span>
+              </p>
+            </div>
+          `,
+        });
+
+        console.log("✅ Reset email sent to:", user.email);
+        return res.json({ message: "Reset link sent to your email!" });
+
+      } catch (emailError) {
+        console.error("❌ Email send failed:", emailError.message);
+        return res.status(500).json({
+          message: "Failed to send reset email. Please check your email config.",
+        });
+      }
     }
 
+    // ── Send SMS ─────────────────────────────────────────────
     if (phoneNumber) {
-      await twilioClient.messages.create({
-        body: `Monexia: Reset your password → ${resetLink} (expires in 1 hour)`,
-        from: process.env.TWILIO_PHONE_NUMBER,
-        to:   phoneNumber,
-      });
-      return res.json({ message: "Reset link sent to your phone!" });
+      try {
+        await twilioClient.messages.create({
+          body: `Monexia: Reset your password → ${resetLink} (expires in 1 hour)`,
+          from: process.env.TWILIO_PHONE_NUMBER,
+          to:   phoneNumber,
+        });
+
+        console.log("✅ Reset SMS sent to:", phoneNumber);
+        return res.json({ message: "Reset link sent to your phone!" });
+
+      } catch (smsError) {
+        console.error("❌ SMS send failed:", smsError.message);
+        return res.status(500).json({
+          message: "Failed to send reset SMS. Please check your Twilio config.",
+        });
+      }
     }
 
   } catch (error) {

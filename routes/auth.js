@@ -81,23 +81,21 @@ router.post('/forgot-password', async (req, res) => {
     if (!email && !phoneNumber)
       return res.status(400).json({ message: 'Email or phone number is required' });
 
-    // Find user by email or phone
     const user = email
       ? await User.findOne({ email: email.toLowerCase().trim() })
       : await User.findOne({ phoneNumber });
 
-    // Always return success to prevent enumeration
     if (!user)
       return res.json({ message: 'If that account exists, a reset link was sent.' });
 
-    // Generate reset token
     const resetToken      = crypto.randomBytes(32).toString('hex');
     user.resetToken       = resetToken;
-    user.resetTokenExpiry = Date.now() + 3600000; // 1 hour
+    user.resetTokenExpiry = Date.now() + 3600000;
     await user.save();
 
-    const resetLink = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
-    console.log('🔗 Reset link generated:', resetLink); // ✅ useful for debugging
+  
+    const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    console.log('🔗 Reset link generated:', resetLink);
 
     // ── Send EMAIL ───────────────────────────────────────────
     if (email) {
@@ -190,7 +188,6 @@ router.post('/reset-password/:token', async (req, res) => {
     if (!user)
       return res.status(400).json({ message: 'Invalid or expired reset token' });
 
-    // Hash and save new password
     user.password         = await bcrypt.hash(password, 10);
     user.resetToken       = undefined;
     user.resetTokenExpiry = undefined;
@@ -198,7 +195,6 @@ router.post('/reset-password/:token', async (req, res) => {
 
     console.log('✅ Password reset for:', user.email);
 
-    // ✅ Auto-login — return fresh JWT
     const authToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
 
     res.json({
