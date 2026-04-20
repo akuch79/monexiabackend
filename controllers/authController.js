@@ -1,204 +1,97 @@
-import User from "../models/User.js";
-import Wallet from "../models/Wallet.js";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import crypto from "crypto";
-import nodemailer from "nodemailer";
-import twilio from "twilio";
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const User = require('../models/User');
+const Wallet = require('../models/Wallet');
 
-// ── Email transporter ────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  service: "Gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+const signToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
 
-// ✅ Verify email connection on server startup
-transporter.verify((error, success) => {
-  if (error) {
-    console.error("❌ Email transporter error:", error.message);
-  } else {
-    console.log("✅ Email transporter ready — emails will send");
-  }
-});
-
-// ── Twilio client ────────────────────────────────────────────
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
-// ── Register ─────────────────────────────────────────────────
-export const registerUser = async (req, res) => {
-  const { name, email, password } = req.body;
+exports.register = async (req, res) => {
   try {
-    const existingUser = await User.findOne({ email });
-    if (existingUser)
-      return res.status(400).json({ message: "User already exists" });
+    const { firstName, lastName, email, password, phone, baseCurrency = 'USD' } = req.body;
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await User.create({ name, email, password: hashedPassword });
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(409).json({ error: 'Email already registered' });
 
-    await Wallet.create({ user: newUser._id, balance: 0 });
+    const tag = email.split('@')[0].toLowerCase().replace(/[^a-z0-9.]/g, '') + Math.floor(Math.random() * 100);
 
-    const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: "1d" });
-    res.status(201).json({ user: newUser, token });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+    const user = await User.create({ firstName, lastName, email, password, phone, monexiaTag: tag, baseCurrency });
+
+    await Wallet.create({ user: user._id, currency: baseCurrency, isDefault: true });
+
+    const token = signToken(user._id);
+    res.status(201).json({ token, user: user.toSafeObject() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 };
 
-// ── Login ─────────────────────────────────────────────────────
-export const loginUser = async (req, res) => {
-  const { email, password } = req.body;
+exports.login = async (req, res) => {
   try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+
     const user = await User.findOne({ email });
-    if (!user)
-      return res.status(400).json({ message: "Invalid email or password" });
+    if (!user || !(await user.comparePassword(password))) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!user.isActive) return res.status(403).json({ error: 'Account deactivated' });
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
-      return res.status(400).json({ message: "Invalid email or password" });
+    user.lastLogin = new Date();
+    await user.save({ validateBeforeSave: false });
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "1d" });
-    res.status(200).json({ user, token });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+    const token = signToken(user._id);
+    res.json({ token, user: user.toSafeObject() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 };
 
-// ── Get Me ────────────────────────────────────────────────────
-export const getMe = async (req, res) => {
-  res.status(200).json(req.user);
+exports.getMe = async (req, res) => {
+  res.json({ user: req.user.toSafeObject() });
 };
 
-// ── Forgot Password ───────────────────────────────────────────
-export const forgotPassword = async (req, res) => {
-  const { email, phoneNumber } = req.body;
+exports.forgotPassword = async (req, res) => {
   try {
-    if (!email && !phoneNumber)
-      return res.status(400).json({ message: "Email or phone number is required" });
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.json({ message: 'If that email exists, a reset link has been sent.' });
 
-    const user = email
-      ? await User.findOne({ email: email.toLowerCase().trim() })
-      : await User.findOne({ phoneNumber });
+    const token = crypto.randomBytes(32).toString('hex');
+    user.passwordResetToken = crypto.createHash('sha256').update(token).digest('hex');
+    user.passwordResetExpires = Date.now() + 60 * 60 * 1000;
+    await user.save({ validateBeforeSave: false });
 
-    if (!user)
-      return res.json({ message: "If that account exists, a reset link was sent." });
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${token}`;
+    console.log('Reset URL (send via email):', resetUrl);
 
-    const resetToken      = crypto.randomBytes(32).toString("hex");
-    user.resetToken       = resetToken;
-    user.resetTokenExpiry = Date.now() + 3600000;
-    await user.save();
-
-    const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
-    console.log("🔗 Reset link generated:", resetLink);
-
-    // ── Send EMAIL ───────────────────────────────────────────
-    if (email) {
-      try {
-        await transporter.sendMail({
-          from:    `"Monexia" <${process.env.EMAIL_USER}>`,
-          to:      user.email,
-          subject: "Reset Your Monexia Password",
-          html: `
-            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:2rem;
-                        background:#0a0f0d;color:#f8fafc;border-radius:16px;">
-              <h2 style="color:#10b981;">Reset Your Password</h2>
-              <p style="color:#94a3b8;">
-                Click below to reset your password. Expires in <strong style="color:#f8fafc;">1 hour</strong>.
-              </p>
-              <a href="${resetLink}"
-                 style="display:inline-block;margin-top:1rem;background:#10b981;
-                        color:#064e3b;padding:14px 32px;border-radius:10px;
-                        text-decoration:none;font-weight:700;">
-                Reset Password
-              </a>
-              <p style="margin-top:2rem;color:#64748b;font-size:0.8rem;">
-                Didn't request this? Ignore this email safely.
-              </p>
-              <hr style="border-color:#1e293b;margin:1.5rem 0;">
-              <p style="color:#475569;font-size:0.75rem;">
-                Or copy this link into your browser:<br>
-                <span style="color:#10b981;">${resetLink}</span>
-              </p>
-            </div>
-          `,
-        });
-
-        console.log("✅ Reset email sent to:", user.email);
-        return res.json({ message: "Reset link sent to your email!" });
-
-      } catch (emailError) {
-        console.error("❌ Email send failed:", emailError.message);
-        return res.status(500).json({
-          message: "Failed to send reset email. Please check your email config.",
-        });
-      }
-    }
-
-    // ── Send SMS ─────────────────────────────────────────────
-    if (phoneNumber) {
-      try {
-        await twilioClient.messages.create({
-          body: `Monexia: Reset your password → ${resetLink} (expires in 1 hour)`,
-          from: process.env.TWILIO_PHONE_NUMBER,
-          to:   phoneNumber,
-        });
-
-        console.log("✅ Reset SMS sent to:", phoneNumber);
-        return res.json({ message: "Reset link sent to your phone!" });
-
-      } catch (smsError) {
-        console.error("❌ SMS send failed:", smsError.message);
-        return res.status(500).json({
-          message: "Failed to send reset SMS. Please check your Twilio config.",
-        });
-      }
-    }
-
-  } catch (error) {
-    console.error("Forgot password error:", error);
-    res.status(500).json({ message: error.message });
+    res.json({ message: 'If that email exists, a reset link has been sent.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 };
 
-// ── Reset Password ────────────────────────────────────────────
-export const resetPassword = async (req, res) => {
-  const { token }    = req.params;
-  const { password } = req.body;
+exports.resetPassword = async (req, res) => {
   try {
-    if (!password)
-      return res.status(400).json({ message: "New password is required" });
+    const { token } = req.params;
+    const { password } = req.body;
 
-    if (password.length < 6)
-      return res.status(400).json({ message: "Password must be at least 6 characters" });
-
+    const hashed = crypto.createHash('sha256').update(token).digest('hex');
     const user = await User.findOne({
-      resetToken:       token,
-      resetTokenExpiry: { $gt: Date.now() },
+      passwordResetToken: hashed,
+      passwordResetExpires: { $gt: Date.now() },
     });
 
-    if (!user)
-      return res.status(400).json({ message: "Invalid or expired reset token" });
+    if (!user) return res.status(400).json({ error: 'Token is invalid or has expired' });
 
-    user.password         = await bcrypt.hash(password, 10);
-    user.resetToken       = undefined;
-    user.resetTokenExpiry = undefined;
+    user.password = password;
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
     await user.save();
 
-    const authToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "1d" });
-
-    res.json({
-      message: "Password reset successfully!",
-      token:   authToken,
-      name:    user.name,
-      email:   user.email,
-    });
-  } catch (error) {
-    console.error("Reset password error:", error);
-    res.status(500).json({ message: error.message });
+    const jwtToken = signToken(user._id);
+    res.json({ token: jwtToken, message: 'Password reset successfully' });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 };

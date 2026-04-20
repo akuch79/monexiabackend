@@ -8,29 +8,34 @@ import User from '../models/User.js';
 
 const router = express.Router();
 
-// ── Email transporter ────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  service: 'Gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+// ── Email transporter (lazy — created on first use so env vars are loaded) ───
+let _transporter = null;
 
-// ✅ Verify email connection on server startup
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('❌ Email transporter error:', error.message);
-  } else {
-    console.log('✅ Email transporter ready — emails will send');
+function getTransporter() {
+  if (!_transporter) {
+    _transporter = nodemailer.createTransport({
+      service: 'Gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
   }
-});
+  return _transporter;
+}
 
-// ── Twilio client ────────────────────────────────────────────
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+// ── Twilio client (lazy — same reason) ──────────────────────────────────────
+let _twilioClient = null;
+
+function getTwilioClient() {
+  if (!_twilioClient) {
+    _twilioClient = twilio(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+  }
+  return _twilioClient;
+}
 
 // ── Signup ───────────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
@@ -93,14 +98,13 @@ router.post('/forgot-password', async (req, res) => {
     user.resetTokenExpiry = Date.now() + 3600000;
     await user.save();
 
-  
     const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
     console.log('🔗 Reset link generated:', resetLink);
 
     // ── Send EMAIL ───────────────────────────────────────────
     if (email) {
       try {
-        await transporter.sendMail({
+        await getTransporter().sendMail({
           from:    `"Monexia" <${process.env.EMAIL_USER}>`,
           to:      user.email,
           subject: 'Reset Your Monexia Password',
@@ -145,7 +149,7 @@ router.post('/forgot-password', async (req, res) => {
     // ── Send SMS ─────────────────────────────────────────────
     if (phoneNumber) {
       try {
-        await twilioClient.messages.create({
+        await getTwilioClient().messages.create({
           body: `Monexia: Reset your password here → ${resetLink} (expires in 1 hour). If you didn't request this, ignore this message.`,
           from: process.env.TWILIO_PHONE_NUMBER,
           to:   phoneNumber,
