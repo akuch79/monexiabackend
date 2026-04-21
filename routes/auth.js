@@ -2,29 +2,17 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import nodemailer from 'nodemailer';
 import twilio from 'twilio';
 import User from '../models/User.js';
+import {
+  sendWelcomeEmail,
+  sendPasswordResetEmail,
+  sendPasswordChangedEmail,
+} from '../utils/mailer.js';
 
 const router = express.Router();
 
-// ── Email transporter (lazy — created on first use so env vars are loaded) ───
-let _transporter = null;
-
-function getTransporter() {
-  if (!_transporter) {
-    _transporter = nodemailer.createTransport({
-      service: 'Gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
-  }
-  return _transporter;
-}
-
-// ── Twilio client (lazy — same reason) ──────────────────────────────────────
+// ── Twilio client (lazy) ─────────────────────────────────────
 let _twilioClient = null;
 
 function getTwilioClient() {
@@ -39,8 +27,15 @@ function getTwilioClient() {
 
 // ── Signup ───────────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
-  const { name, email, password } = req.body;
   try {
+    const { name, email, password } = req.body;
+
+    if (!name || !email || !password)
+      return res.status(400).json({ message: 'Name, email and password are required' });
+
+    if (password.length < 6)
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+
     const normalizedEmail = email.toLowerCase().trim();
     const userExists = await User.findOne({ email: normalizedEmail });
     if (userExists) return res.status(400).json({ message: 'User already exists' });
@@ -48,9 +43,18 @@ router.post('/signup', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await User.create({ name, email: normalizedEmail, password: hashedPassword });
 
+    // ── Welcome email (non-fatal) ────────────────────────────
+    try {
+      await sendWelcomeEmail(normalizedEmail, name);
+    } catch (emailErr) {
+      console.error('⚠️  Welcome email failed (non-fatal):', emailErr.message);
+    }
+
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.status(201).json({ user: { id: user._id, name, email: normalizedEmail }, token });
+
   } catch (err) {
+    console.error('Signup error:', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -72,6 +76,7 @@ router.post('/login', async (req, res) => {
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
     res.json({ token, name: user.name, email: user.email });
+
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ message: 'Server error during login' });
@@ -90,12 +95,13 @@ router.post('/forgot-password', async (req, res) => {
       ? await User.findOne({ email: email.toLowerCase().trim() })
       : await User.findOne({ phoneNumber });
 
+    // Always 200 — prevents user enumeration
     if (!user)
       return res.json({ message: 'If that account exists, a reset link was sent.' });
 
     const resetToken      = crypto.randomBytes(32).toString('hex');
     user.resetToken       = resetToken;
-    user.resetTokenExpiry = Date.now() + 3600000;
+    user.resetTokenExpiry = Date.now() + 3600000; // 1 hour
     await user.save();
 
     const resetLink = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
@@ -104,44 +110,16 @@ router.post('/forgot-password', async (req, res) => {
     // ── Send EMAIL ───────────────────────────────────────────
     if (email) {
       try {
-        await getTransporter().sendMail({
-          from:    `"Monexia" <${process.env.EMAIL_USER}>`,
-          to:      user.email,
-          subject: 'Reset Your Monexia Password',
-          html: `
-            <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:2rem;
-                        background:#0a0f0d;color:#f8fafc;border-radius:16px;">
-              <h2 style="color:#10b981;margin-bottom:0.5rem;">Reset Your Password</h2>
-              <p style="color:#94a3b8;margin-bottom:1.5rem;">
-                Click the button below to reset your Monexia password.
-                This link expires in <strong style="color:#f8fafc;">1 hour</strong>.
-              </p>
-              <a href="${resetLink}"
-                 style="display:inline-block;background:#10b981;color:#064e3b;
-                        padding:14px 32px;border-radius:10px;text-decoration:none;
-                        font-weight:700;font-size:1rem;">
-                Reset Password
-              </a>
-              <p style="margin-top:2rem;color:#64748b;font-size:0.8rem;">
-                If you didn't request this, you can safely ignore this email.
-                Your password will not change.
-              </p>
-              <hr style="border-color:#1e293b;margin:1.5rem 0;">
-              <p style="color:#475569;font-size:0.75rem;">
-                Or copy this link into your browser:<br>
-                <span style="color:#10b981;">${resetLink}</span>
-              </p>
-            </div>
-          `,
-        });
-
+        await sendPasswordResetEmail(user.email, resetLink);
         console.log('✅ Reset email sent to:', user.email);
         return res.json({ message: 'Reset link sent to your email!' });
-
       } catch (emailError) {
         console.error('❌ Email send failed:', emailError.message);
+        console.error('   Code   :', emailError.code);
+        console.error('   Command:', emailError.command);
         return res.status(500).json({
-          message: 'Failed to send reset email. Please check your email config.',
+          message: 'Failed to send reset email.',
+          ...(process.env.NODE_ENV === 'development' && { error: emailError.message }),
         });
       }
     }
@@ -150,18 +128,17 @@ router.post('/forgot-password', async (req, res) => {
     if (phoneNumber) {
       try {
         await getTwilioClient().messages.create({
-          body: `Monexia: Reset your password here → ${resetLink} (expires in 1 hour). If you didn't request this, ignore this message.`,
+          body: `Monexia: Reset your password → ${resetLink} (expires in 1 hour). Ignore if you didn't request this.`,
           from: process.env.TWILIO_PHONE_NUMBER,
           to:   phoneNumber,
         });
-
         console.log('✅ Reset SMS sent to:', phoneNumber);
         return res.json({ message: 'Reset link sent to your phone!' });
-
       } catch (smsError) {
         console.error('❌ SMS send failed:', smsError.message);
         return res.status(500).json({
-          message: 'Failed to send reset SMS. Please check your Twilio config.',
+          message: 'Failed to send reset SMS.',
+          ...(process.env.NODE_ENV === 'development' && { error: smsError.message }),
         });
       }
     }
@@ -199,14 +176,21 @@ router.post('/reset-password/:token', async (req, res) => {
 
     console.log('✅ Password reset for:', user.email);
 
-    const authToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+    // ── Confirmation email (non-fatal) ───────────────────────
+    try {
+      await sendPasswordChangedEmail(user.email);
+    } catch (emailErr) {
+      console.error('⚠️  Confirmation email failed (non-fatal):', emailErr.message);
+    }
 
+    const authToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
     res.json({
       message: 'Password reset successfully!',
       token:   authToken,
       name:    user.name,
       email:   user.email,
     });
+
   } catch (err) {
     console.error('Reset password error:', err);
     res.status(500).json({ message: err.message });
