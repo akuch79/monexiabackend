@@ -10,41 +10,65 @@ import mpesaRoutes from "./routes/mpesa.js";
 import authRoutes from "./routes/auth.js";
 import transactionRoutes from "./routes/transactions.js";
 import userRoutes from "./routes/users.js";
-import walletRoutes from "./routes/wallet.js"; // ✅ Added wallet routes
+import walletRoutes from "./routes/wallet.js";
 import { getTransporter } from "./utils/mailer.js";
 
 const app = express();
 
 // ── Env validation ───────────────────────────────────────────
 const REQUIRED_ENV = ["MONGO_URI", "JWT_SECRET"];
-const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+const OPTIONAL_ENV = {
+  email:  ["EMAIL_USER", "EMAIL_PASS"],
+  mpesa:  ["MPESA_CONSUMER_KEY", "MPESA_CONSUMER_SECRET", "MPESA_PASSKEY", "MPESA_SHORT_CODE", "MPESA_CALLBACK_URL"],
+};
 
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
 if (missingEnv.length) {
   console.error("❌ Missing required env variables:", missingEnv.join(", "));
-  if (missingEnv.includes("MONGO_URI")) {
-    console.error("⚠️  MongoDB connection will fail without MONGO_URI");
+  if (missingEnv.includes("MONGO_URI"))  console.error("⚠️  MongoDB connection will fail without MONGO_URI");
+  if (missingEnv.includes("JWT_SECRET")) console.error("⚠️  JWT authentication will fail without JWT_SECRET");
+}
+
+// M-Pesa specific validation
+const missingMpesa = OPTIONAL_ENV.mpesa.filter((key) => !process.env[key]);
+if (missingMpesa.length) {
+  console.warn("⚠️  M-Pesa partially configured. Missing:", missingMpesa.join(", "));
+  if (!process.env.MPESA_CONSUMER_KEY || !process.env.MPESA_CONSUMER_SECRET) {
+    console.warn("   ↳ STK Push, C2B, B2C will fail without CONSUMER_KEY + CONSUMER_SECRET");
   }
-  if (missingEnv.includes("JWT_SECRET")) {
-    console.error("⚠️  JWT authentication will fail without JWT_SECRET");
+  if (!process.env.MPESA_PASSKEY || !process.env.MPESA_SHORT_CODE) {
+    console.warn("   ↳ STK Push will fail without PASSKEY + SHORT_CODE");
+  }
+  if (!process.env.MPESA_CALLBACK_URL && !process.env.BACKEND_URL) {
+    console.warn("   ↳ Safaricom callbacks won't reach your server without MPESA_CALLBACK_URL or BACKEND_URL");
   }
 }
 
-// Optional env warnings
 if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-  console.warn("⚠️  Email notifications disabled - missing EMAIL_USER or EMAIL_PASS");
+  console.warn("⚠️  Email notifications disabled — missing EMAIL_USER or EMAIL_PASS");
 }
 
-console.log("📧 Email configured:", process.env.EMAIL_USER ? "✅" : "❌");
-console.log("🔐 JWT Secret:", process.env.JWT_SECRET ? "✅" : "❌");
-console.log("💳 M-Pesa:", process.env.MPESA_CONSUMER_KEY ? "✅" : "❌");
+// Startup summary
+console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+console.log("  Monexia Backend — Service Status");
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+console.log("📧 Email:        ", process.env.EMAIL_USER ? "✅ configured" : "❌ missing");
+console.log("🔐 JWT Secret:   ", process.env.JWT_SECRET ? "✅ configured" : "❌ missing");
+console.log("💳 M-Pesa Key:   ", process.env.MPESA_CONSUMER_KEY ? "✅ configured" : "❌ missing");
+console.log("💳 M-Pesa Secret:", process.env.MPESA_CONSUMER_SECRET ? "✅ configured" : "❌ missing");
+console.log("🔑 M-Pesa Passkey:", process.env.MPESA_PASSKEY ? "✅ configured" : "⚠️  missing (STK Push)");
+console.log("📟 Short Code:   ", process.env.MPESA_SHORT_CODE ? "✅ " + process.env.MPESA_SHORT_CODE : "⚠️  using sandbox default 174379");
+console.log("🌍 Environment:  ", process.env.MPESA_ENV === "production" ? "🔴 PRODUCTION" : "🟡 sandbox");
+console.log("📡 Callback URL: ", process.env.MPESA_CALLBACK_URL || process.env.BACKEND_URL || "❌ not set");
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-// ── Init email transporter (verifies SMTP on startup) ────────
+// ── Init email transporter ───────────────────────────────────
 if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
   try {
     getTransporter();
-    console.log("✅ Email transporter initialized successfully");
+    console.log("✅ Email transporter initialized");
   } catch (error) {
-    console.error("❌ Email transporter initialization failed:", error.message);
+    console.error("❌ Email transporter failed:", error.message);
   }
 } else {
   console.warn("⚠️  Email transporter skipped — EMAIL_USER or EMAIL_PASS missing.");
@@ -68,39 +92,64 @@ app.use((req, _res, next) => {
 });
 
 // ── Routes ───────────────────────────────────────────────────
-app.use("/api/mpesa", mpesaRoutes);
-app.use("/api/auth", authRoutes);
+app.use("/api/mpesa",        mpesaRoutes);
+app.use("/api/auth",         authRoutes);
 app.use("/api/transactions", transactionRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/wallet", walletRoutes); // ✅ Wallet routes added
+app.use("/api/users",        userRoutes);
+app.use("/api/wallet",       walletRoutes);
 
-// ── Health check ─────────────────────────────────────────────
+// ── Root health check ────────────────────────────────────────
 app.get("/", (_req, res) => res.json({
   status: "ok",
   message: "Monexia Backend Running 🚀",
   version: "1.0.0",
   timestamp: new Date().toISOString(),
   services: {
-    email: process.env.EMAIL_USER ? "configured ✅" : "missing ❌",
+    email:    process.env.EMAIL_USER ? "configured ✅" : "missing ❌",
     database: mongoose.connection.readyState === 1 ? "connected ✅" : "disconnected ❌",
-    mpesa: process.env.MPESA_CONSUMER_KEY ? "configured ✅" : "missing ❌",
-    wallet: "enabled ✅",
+    mpesa:    process.env.MPESA_CONSUMER_KEY ? "configured ✅" : "missing ❌",
+    wallet:   "enabled ✅",
   },
 }));
 
-// Detailed health check endpoint
+// ── Detailed health check ─────────────────────────────────────
 app.get("/health", (_req, res) => {
-  const dbStatus = mongoose.connection.readyState;
-  const health = {
-    status: dbStatus === 1 ? "healthy" : "unhealthy",
-    uptime: process.uptime(),
+  const dbState = mongoose.connection.readyState; // 0=disconnected 1=connected 2=connecting 3=disconnecting
+  const dbStateMap = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
+
+  const mpesaConfigured = !!(process.env.MPESA_CONSUMER_KEY && process.env.MPESA_CONSUMER_SECRET);
+  const mpesaStkReady   = mpesaConfigured && !!(process.env.MPESA_PASSKEY && process.env.MPESA_SHORT_CODE);
+  const mpesaB2cReady   = mpesaConfigured && !!(process.env.MPESA_B2C_SECURITY_CREDENTIAL);
+  const callbackSet     = !!(process.env.MPESA_CALLBACK_URL || process.env.BACKEND_URL);
+
+  const isHealthy = dbState === 1;
+
+  res.status(isHealthy ? 200 : 503).json({
+    status:    isHealthy ? "healthy" : "unhealthy",
+    uptime:    process.uptime(),
     timestamp: new Date().toISOString(),
+    env:       process.env.NODE_ENV || "development",
     services: {
-      database: dbStatus === 1 ? "up" : "down",
-      api: "up",
+      database: {
+        status: dbStateMap[dbState] || "unknown",
+        healthy: dbState === 1,
+      },
+      api: { status: "up", healthy: true },
+      email: {
+        status:  process.env.EMAIL_USER ? "configured" : "missing",
+        healthy: !!(process.env.EMAIL_USER && process.env.EMAIL_PASS),
+      },
+      mpesa: {
+        env:          process.env.MPESA_ENV || "sandbox",
+        credentials:  mpesaConfigured  ? "ok"      : "missing",
+        stk_push:     mpesaStkReady     ? "ready"   : "incomplete",
+        b2c:          mpesaB2cReady     ? "ready"   : "incomplete — missing MPESA_B2C_SECURITY_CREDENTIAL",
+        callback_url: callbackSet       ? "set"     : "⚠️ not configured",
+        healthy:      mpesaConfigured,
+      },
+      wallet: { status: "enabled", healthy: true },
     },
-  };
-  res.status(dbStatus === 1 ? 200 : 503).json(health);
+  });
 });
 
 // ── 404 handler ──────────────────────────────────────────────
@@ -115,7 +164,6 @@ app.use((req, res) => {
 app.use((err, req, res, _next) => {
   console.error(`[ERROR] ${req.method} ${req.originalUrl}`, err);
 
-  // Mongoose validation error
   if (err.name === "ValidationError") {
     return res.status(400).json({
       success: false,
@@ -123,32 +171,17 @@ app.use((err, req, res, _next) => {
       errors: Object.values(err.errors).map((e) => e.message),
     });
   }
-
-  // MongoDB duplicate key error
   if (err.code === 11000) {
     const field = Object.keys(err.keyValue || {})[0] ?? "field";
-    return res.status(409).json({
-      success: false,
-      message: `Duplicate value for ${field}. Please use a different value.`,
-    });
+    return res.status(409).json({ success: false, message: `Duplicate value for ${field}.` });
   }
-
-  // JWT errors
   if (err.name === "JsonWebTokenError") {
-    return res.status(401).json({
-      success: false,
-      message: "Invalid authentication token",
-    });
+    return res.status(401).json({ success: false, message: "Invalid authentication token" });
   }
-
   if (err.name === "TokenExpiredError") {
-    return res.status(401).json({
-      success: false,
-      message: "Authentication token has expired",
-    });
+    return res.status(401).json({ success: false, message: "Authentication token has expired" });
   }
 
-  // Default error
   res.status(err.status || 500).json({
     success: false,
     message: err.message || "Internal server error",
@@ -162,75 +195,48 @@ const connectDB = async (retryCount = 0) => {
   const RETRY_DELAY = 5000;
 
   try {
-    if (!process.env.MONGO_URI) {
-      throw new Error("MONGO_URI environment variable is not defined");
-    }
+    if (!process.env.MONGO_URI) throw new Error("MONGO_URI environment variable is not defined");
 
     await mongoose.connect(process.env.MONGO_URI, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
       connectTimeoutMS: 10000,
     });
-    
+
     console.log("✅ MongoDB connected successfully");
-    
-    // Handle connection events
-    mongoose.connection.on("error", (err) => {
-      console.error("❌ MongoDB connection error:", err);
-    });
 
-    mongoose.connection.on("disconnected", () => {
-      console.warn("⚠️  MongoDB disconnected");
-    });
-
-    mongoose.connection.on("reconnected", () => {
-      console.log("✅ MongoDB reconnected");
-    });
+    mongoose.connection.on("error",       (err) => console.error("❌ MongoDB error:", err));
+    mongoose.connection.on("disconnected", ()   => console.warn("⚠️  MongoDB disconnected"));
+    mongoose.connection.on("reconnected",  ()   => console.log("✅ MongoDB reconnected"));
 
   } catch (err) {
-    console.error(`❌ MongoDB connection attempt ${retryCount + 1} failed:`, err.message);
-    
-    const isWhitelist = err.message.includes("security-whitelist") ||
-                        err.message.includes("IP") ||
-                        err.message.includes("whitelist");
+    console.error(`❌ MongoDB attempt ${retryCount + 1} failed:`, err.message);
 
+    const isWhitelist = ["security-whitelist", "IP", "whitelist"].some((s) => err.message.includes(s));
     if (isWhitelist) {
-      console.error("❌ MongoDB Atlas IP whitelist issue detected!");
-      console.error("   Please add your IP address to MongoDB Atlas Network Access:");
-      console.error("   1. Go to https://cloud.mongodb.com");
-      console.error("   2. Navigate to Network Access");
-      console.error("   3. Add IP address 0.0.0.0/0 (for development) or your specific IP");
-      console.error("   4. Wait a few minutes for changes to propagate");
+      console.error("❌ MongoDB Atlas IP whitelist issue — add your IP at https://cloud.mongodb.com → Network Access");
     }
 
     if (retryCount < MAX_RETRIES) {
-      console.log(`🔄 Retrying connection in ${RETRY_DELAY / 1000} seconds... (Attempt ${retryCount + 1}/${MAX_RETRIES})`);
+      console.log(`🔄 Retrying in ${RETRY_DELAY / 1000}s... (${retryCount + 1}/${MAX_RETRIES})`);
       setTimeout(() => connectDB(retryCount + 1), RETRY_DELAY);
     } else {
-      console.error("❌ Failed to connect to MongoDB after maximum retries");
-      console.error("   Please check your MONGO_URI and network settings");
+      console.error("❌ Max retries reached. Exiting.");
       process.exit(1);
     }
   }
 };
 
-// Start database connection
 connectDB();
 
-// ── Port management with conflict resolution ──────────────────
+// ── Port management ───────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 5003;
 
 const isPortInUse = (port) =>
   new Promise((resolve) => {
     const tester = createServer()
-      .once("error", (err) => {
-        if (err.code === "EADDRINUSE") resolve(true);
-        else resolve(false);
-      })
-      .once("listening", () => {
-        tester.close();
-        resolve(false);
-      })
+      .once("error",     (err) => resolve(err.code === "EADDRINUSE"))
+      .once("listening", ()    => { tester.close(); resolve(false); })
       .listen(port);
   });
 
@@ -240,30 +246,24 @@ const startServer = async () => {
     let activePort = PORT;
 
     if (inUse) {
-      console.warn(`⚠️  Port ${PORT} is in use`);
+      console.warn(`⚠️  Port ${PORT} in use`);
       activePort = PORT + 1;
-      console.log(`🔄 Attempting to use port ${activePort} instead`);
-      
-      // Check if the alternative port is also in use
       const altInUse = await isPortInUse(activePort);
       if (altInUse) {
-        console.error(`❌ Port ${activePort} is also in use`);
-        console.error("   Please free up a port or change the PORT environment variable");
+        console.error(`❌ Port ${activePort} also in use. Set a different PORT in .env`);
         process.exit(1);
       }
     }
 
     const server = app.listen(activePort, () => {
-      console.log(`🚀 Server running on port ${activePort}`);
-      console.log(`📡 API URL: http://localhost:${activePort}`);
-      console.log(`❤️  Health check: http://localhost:${activePort}/health`);
-      console.log(`👛 Wallet API: http://localhost:${activePort}/api/wallet`);
+      console.log(`\n🚀 Server running on port ${activePort}`);
+      console.log(`📡 API:          http://localhost:${activePort}`);
+      console.log(`❤️  Health:       http://localhost:${activePort}/health`);
+      console.log(`💳 M-Pesa API:   http://localhost:${activePort}/api/mpesa`);
+      console.log(`👛 Wallet API:   http://localhost:${activePort}/api/wallet\n`);
     });
 
-    server.on("error", (err) => {
-      console.error("❌ Server error:", err);
-      process.exit(1);
-    });
+    server.on("error", (err) => { console.error("❌ Server error:", err); process.exit(1); });
 
   } catch (err) {
     console.error("❌ Failed to start server:", err);
@@ -271,47 +271,31 @@ const startServer = async () => {
   }
 };
 
-// Start the server only after DB connection is established
 mongoose.connection.once("connected", () => {
-  console.log("🎉 Database ready, starting server...");
+  console.log("🎉 Database ready — starting server...");
   startServer();
 });
 
-// If DB connection fails, don't start server
-mongoose.connection.on("error", (err) => {
-  console.error("❌ Database connection failed. Server not started.");
-  if (process.env.NODE_ENV === "development") {
-    console.error("   Please check your MongoDB connection string and network settings");
-  }
+mongoose.connection.on("error", () => {
+  console.error("❌ Database failed. Server not started.");
 });
 
-// ── Graceful shutdown ────────────────────────────────────────
+// ── Graceful shutdown ─────────────────────────────────────────
 const gracefulShutdown = async (signal) => {
-  console.log(`\n${signal} received. Starting graceful shutdown...`);
-  
+  console.log(`\n${signal} received — shutting down gracefully...`);
   try {
     await mongoose.connection.close();
-    console.log("✅ MongoDB connection closed");
+    console.log("✅ MongoDB closed");
     process.exit(0);
   } catch (err) {
-    console.error("❌ Error during graceful shutdown:", err);
+    console.error("❌ Shutdown error:", err);
     process.exit(1);
   }
 };
 
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-
-// Handle uncaught exceptions
-process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err);
-  gracefulShutdown("Uncaught Exception");
-});
-
-// Handle unhandled promise rejections
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
-  gracefulShutdown("Unhandled Rejection");
-});
+process.on("SIGTERM",            () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT",             () => gracefulShutdown("SIGINT"));
+process.on("uncaughtException",  (err) => { console.error("❌ Uncaught Exception:", err); gracefulShutdown("uncaughtException"); });
+process.on("unhandledRejection", (reason) => { console.error("❌ Unhandled Rejection:", reason); gracefulShutdown("unhandledRejection"); });
 
 export default app;
