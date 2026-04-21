@@ -20,14 +20,18 @@ const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
 
 if (missingEnv.length) {
   console.error("❌ Missing required env variables:", missingEnv.join(", "));
-  process.exit(1);
+  console.error("⚠️  Server will start but email features will not work.");
 }
 
 console.log("EMAIL_USER:", process.env.EMAIL_USER);
-console.log("EMAIL_PASS length:", process.env.EMAIL_PASS.length);
+console.log("EMAIL_PASS length:", process.env.EMAIL_PASS ? process.env.EMAIL_PASS.length : 0);
 
 // ── Init email transporter (verifies SMTP on startup) ────────
-getTransporter();
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+  getTransporter();
+} else {
+  console.warn("⚠️  Email transporter skipped — EMAIL_USER or EMAIL_PASS missing.");
+}
 
 // ── Middleware ───────────────────────────────────────────────
 app.use(cors({
@@ -51,7 +55,12 @@ app.use("/api/transactions", transactionRoutes);
 app.use("/api/users",        userRoutes);
 
 // ── Health check ─────────────────────────────────────────────
-app.get("/", (_req, res) => res.json({ status: "ok", message: "Monexia Backend Running 🚀" }));
+app.get("/", (_req, res) => res.json({
+  status:  "ok",
+  message: "Monexia Backend Running 🚀",
+  email:   process.env.EMAIL_USER ? "configured ✅" : "missing ❌",
+  db:      mongoose.connection.readyState === 1 ? "connected ✅" : "disconnected ❌",
+}));
 
 // ── 404 handler ──────────────────────────────────────────────
 app.use((req, res) => {
@@ -69,7 +78,7 @@ app.use((err, req, res, _next) => {
     return res.status(400).json({
       success: false,
       message: "Validation error",
-      errors: Object.values(err.errors).map((e) => e.message),
+      errors:  Object.values(err.errors).map((e) => e.message),
     });
   }
 
@@ -100,8 +109,14 @@ const connectDB = async () => {
     });
     console.log("MongoDB connected ✅");
   } catch (err) {
-    console.error("MongoDB connection error:", err.message);
-    console.log("Retrying in 5 seconds...");
+    const isWhitelist = err.message.includes("security-whitelist") ||
+                        err.message.includes("IP");
+    if (isWhitelist) {
+      console.error("❌ MongoDB blocked — whitelist your IP at: https://cloud.mongodb.com → Network Access");
+    } else {
+      console.error("❌ MongoDB connection error:", err.message);
+    }
+    console.log("🔄 Retrying in 5 seconds...");
     setTimeout(connectDB, 5000);
   }
 };
